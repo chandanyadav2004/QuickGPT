@@ -5,7 +5,7 @@ import Credits from './pages/Credits'
 import { Route, Routes } from 'react-router-dom'
 import Community from './pages/Community'
 import { assets } from './assets/assets'
-    
+import './assets/prism.css'
 
 
 const App = () => {
