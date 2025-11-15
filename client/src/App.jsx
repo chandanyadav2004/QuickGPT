@@ -2,15 +2,19 @@ import React, { useState } from 'react'
 import Sidebar from './components/Sidebar'
 import ChatBox from './components/ChatBox'
 import Credits from './pages/Credits'
-import { Route, Routes } from 'react-router-dom'
+import { Route, Routes, useLocation } from 'react-router-dom'
 import Community from './pages/Community'
 import { assets } from './assets/assets'
 import './assets/prism.css'
+import Loading from './pages/Loading'
 
 
 const App = () => {
 
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const { pathname} = useLocation()
+
+  if(pathname === '/loading') return <Loading />
 
   return (
     <>
