@@ -41,6 +41,8 @@ export const getPlans = async (req,res) => {
 
 }
 
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+
 // API Controller for purchasing a plan
 export const purchasePlan = async (req,res) => {
     
@@ -64,7 +66,34 @@ export const purchasePlan = async (req,res) => {
         isPaid: false,
        })
 
+       const { origin } = req.headers;
 
+
+       const session = await stripe.checkout.sessions.create({
+           line_items: [
+               {
+                   price_data: {
+                    currency: "usd",
+                    unit_amount: plan.price * 100,
+                    product_data: {
+                        name: plan.name,
+                    }
+                   },
+                   quantity: 1,
+                },
+            ],
+            mode: 'payment',
+            success_url: `${origin}/loading`,
+            cancel_url: `${origin}`,
+            metadata: {
+                transactionId: transaction._id.toString(),
+                appId: "quickgpt"
+            },
+            expires_at: Math.floor(Date.now() / 1000) + 30 *60, //Expries in 30 mins
+        });
+
+
+         res.json({sucess: true, url: session.url})
 
     } catch (error) {
         res.json({sucess: false, message: error.message})
