@@ -2,12 +2,13 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useAppContext } from '../context/AppContext'
 import { assets } from '../assets/assets'
 import Message from './Message'
+import toast from 'react-hot-toast'
 
 const ChatBox = () => {
 
   const containerRef = useRef(null)
 
-  const { selectedChat,theme} = useAppContext()
+  const { selectedChat,theme, user, axios,token, setUser} = useAppContext()
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
 
@@ -16,7 +17,42 @@ const ChatBox = () => {
   const [isPublished, setIsPublished] = useState(false)
 
   const onSubmit = async (e) =>{
-    e.preventDefault()
+   
+    try {
+       e.preventDefault()
+      if (!user) {
+        return toast('Login to send message');
+      }
+      setLoading(true)
+      const promptCopy = prompt
+      setPrompt('')
+      setMessages(pre => [...pre,{role: 'user', content: prompt, timestamp: Date.now(), isImage: false}])
+      const { data } = await axios.post(
+        `/api/message/${mode}`,
+        { chatId: selectedChat._id, prompt, isPublished },
+        { headers: { Authorization: token } }
+      );
+      if (data.success) {
+        setMessages(prev => [...prev, data.reply])
+        setPrompt('')
+        // decrease credits
+        if(mode === 'image')
+        {
+          setUser(prev => ({...prev, credits: prev.credits -2}))
+        }else {
+          setUser(prev => ({...prev, credits: prev.credits -1}))
+        }
+        
+      } else {
+        toast.error(data.message);
+        setPrompt(promptCopy)
+      }
+    } catch (error) {
+      toast.error(error.message);
+    }finally{
+      setPrompt('')
+      setLoading(false)
+    }
   }
   
 
@@ -79,7 +115,14 @@ const ChatBox = () => {
           <option value="text" className=' dark:bg-purple-900'>Text</option>
           <option value="image" className=' dark:bg-purple-900'>Image</option>
         </select>
-        <input onChange={(e)=>setPrompt(e.target.value)} type="text" placeholder=' Type your prompt here...' className=' flex-1 w-full text-sm outline-none' required />
+        <input
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            type="text"
+            placeholder=" Type your prompt here..."
+            className=" flex-1 w-full text-sm outline-none"
+            required
+          />
         <button className="" disabled={loading}>
           <img src={loading ? assets.stop_icon : assets.send_icon} className=' w-8 cursor-pointer' alt="" />
         </button>
