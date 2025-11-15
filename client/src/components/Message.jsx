@@ -4,6 +4,7 @@ import moment from "moment";
 import Markdown from "react-markdown";
 import Prism from "prismjs";
 import toast from "react-hot-toast";
+import { assets } from "../assets/assets";
 
 /**
  * Message component
@@ -175,7 +176,7 @@ const Message = ({ message }) => {
               {moment(message.timestamp).fromNow()}
             </span>
           </div>
-          <img src={/* optional avatar URL */ ""} className="w-8 rounded-full" alt="user" />
+          <img src={assets.user_icon} className="w-8 rounded-full" alt="user" />
         </div>
       ) : (
         <div className="inline-flex flex-col gap-2 p-3 px-4 max-w-2xl bg-primary/20 dark:bg-[#57317C]/30 border border-[#80609F]/30 rounded-md my-4">
