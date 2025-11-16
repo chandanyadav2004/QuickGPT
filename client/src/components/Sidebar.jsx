@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useAppContext } from "../context/AppContext";
 import { assets } from "../assets/assets";
 import moment from "moment";
@@ -20,6 +20,7 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
     setToken,
   } = useAppContext();
   const [search, setSearch] = useState("");
+  const searchRef = useRef(null);
 
   const logout = () => {
     localStorage.removeItem("token");
@@ -53,6 +54,18 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
     }
   };
 
+  const clearSearch = () => {
+    setSearch("");
+    // focus the input after clearing
+    if (searchRef.current) searchRef.current.focus();
+  };
+
+  const onSearchKeyDown = (e) => {
+    if (e.key === "Escape") {
+      clearSearch();
+    }
+  };
+
   return (
     <div
       className={` flex flex-col h-screen min-w-72 p-5 dark:bg-gradient-to-b from-[#242124]/30 to-[#000000]/30 border-r border-[#80609F]/30 backdrop-blur-3xl transition-all duration-500 max-md:absolute left-0 z-1 ${
@@ -75,12 +88,25 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
       <div className=" flex items-center gap-2 p-3 mt-4 border border-gray-400 dark:border-white/20 rounded-md">
         <img src={assets.search_icon} className=" w-4 not-dark:invert" alt="" />
         <input
+          ref={searchRef}
           type="text"
           placeholder=" Search conversation"
-          className=" text-xs placeholder:text-gray-400 outline-none"
+          className=" text-xs placeholder:text-gray-400 outline-none flex-1"
           onChange={(e) => setSearch(e.target.value)}
           value={search}
+          onKeyDown={onSearchKeyDown}
         />
+        {/* Clear icon - shown only when search has value */}
+        {search.length > 0 && (
+          <button
+            type="button"
+            onClick={clearSearch}
+            className=" ml-2 p-1 rounded hover:bg-gray-100 dark:hover:bg-white/5"
+            title="Clear search"
+          >
+            <img src={assets.close_icon} alt="clear" className=" w-3 h-3 not-dark:invert" />
+          </button>
+        )}
       </div>
 
       {/* Recent Chats */}
