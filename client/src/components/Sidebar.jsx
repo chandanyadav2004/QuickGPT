@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useAppContext } from "../context/AppContext";
 import { assets } from "../assets/assets";
 import moment from "moment";
@@ -22,6 +22,71 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
 
   const [search, setSearch] = useState("");
   const searchRef = useRef(null);
+  const [autoCreated, setAutoCreated] = useState(false);
+
+  // -------------------------------
+  // Auto-create a new chat on app load (keep previous chats)
+  // -------------------------------
+  useEffect(() => {
+    if (!user) return;
+    if (autoCreated) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // try to create a new chat; many implementations return the created chat object
+        const created = await createNewChat();
+
+        if (!cancelled && created && created._id) {
+          // prepend new chat but avoid duplicates
+          setChats((prev) => {
+            const filtered = prev ? prev.filter((c) => c._id !== created._id) : [];
+            return [created, ...filtered];
+          });
+          setSelectedChat(created);
+          navigate("/");
+          setAutoCreated(true);
+          return;
+        }
+
+        // fallback: if createNewChat didn't return created object, fetch latest chats
+        if (!cancelled && typeof fetchUserChats === "function") {
+          const latest = await fetchUserChats(); // may set chats internally or return array
+          const latestChats = Array.isArray(latest) ? latest : (chats || []);
+          if (latestChats.length > 0) {
+            const newest = latestChats
+              .slice()
+              .sort(
+                (a, b) =>
+                  new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)
+              )[0];
+            if (newest) {
+              setChats((prev) => {
+                const filtered = prev ? prev.filter((c) => c._id !== newest._id) : [];
+                return [newest, ...filtered];
+              });
+              setSelectedChat(newest);
+              navigate("/");
+              setAutoCreated(true);
+              return;
+            }
+          }
+        }
+
+        // mark done to avoid retry loops
+        setAutoCreated(true);
+      } catch (err) {
+        console.error("Auto-create chat failed:", err);
+        setAutoCreated(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
   const logout = () => {
     localStorage.removeItem("token");
