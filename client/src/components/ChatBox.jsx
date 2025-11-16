@@ -7,6 +7,7 @@ import toast from 'react-hot-toast'
 const ChatBox = () => {
   const containerRef = useRef(null)
   const recognitionRef = useRef(null)
+  const promptRef = useRef(null)
 
   const { selectedChat, theme, user, axios, token, setUser } = useAppContext()
   const [messages, setMessages] = useState([])
@@ -19,6 +20,9 @@ const ChatBox = () => {
   // Mic state
   const [listening, setListening] = useState(false)
   const committedRef = useRef('') // value committed before listening (used for interim)
+
+  // Summarizer instruction prefix
+  const SUMMARIZE_PREFIX = "Summarize the following text concisely in 3 bullet points:\n\n"
 
   const onSubmit = async (e) => {
     try {
@@ -33,7 +37,7 @@ const ChatBox = () => {
       setLoading(true)
       const promptCopy = prompt
       // append user's message locally
-      setMessages(pre => [...pre, { role: 'user', content: prompt, timestamp: Date.now(), isImage: false }])
+      setMessages(pre => [...pre, { role: 'user', content: promptCopy, timestamp: Date.now(), isImage: false }])
       // clear input for UX while request in-flight
       setPrompt('')
 
@@ -130,8 +134,7 @@ const ChatBox = () => {
 
     recog.onend = () => {
       setListening(false)
-      // clear committedRef? keep it so prompt retains final text
-      // committedRef.current = ''
+      // keep committedRef so prompt retains final text
     }
 
     recognitionRef.current = recog
@@ -178,6 +181,30 @@ const ChatBox = () => {
     }
   }
 
+  // Summarizer tooltip logic:
+  // show only for text mode and non-empty prompt and if prefix not already present
+  const showSummarizer = mode === 'text' && prompt.trim().length > 0 && !prompt.startsWith(SUMMARIZE_PREFIX)
+
+  const applySummarizer = () => {
+    // prepend the summarizer instruction before the current prompt
+    if (!showSummarizer) return
+    const newPrompt = `${SUMMARIZE_PREFIX}${prompt}`
+    setPrompt(newPrompt)
+
+    // focus input and move caret to end so user can edit
+    setTimeout(() => {
+      if (promptRef.current) {
+        promptRef.current.focus()
+        try {
+          const len = newPrompt.length
+          promptRef.current.setSelectionRange(len, len)
+        } catch (e) {
+          // some browsers/elements might not support setSelectionRange
+        }
+      }
+    }, 50)
+  }
+
   return (
     <div className=' flex-1 flex flex-col justify-between m-5 md:m-10 xl:mx-30 max-md:mt-14 2xl:pr-40'>
       {/* Chat messages */}
@@ -213,7 +240,20 @@ const ChatBox = () => {
           <option value="image" className=' dark:bg-purple-900'>Image</option>
         </select>
 
+        {/* Summarizer tooltip/button - appears only when applicable */}
+        {showSummarizer && (
+          <button
+            type="button"
+            onClick={applySummarizer}
+            className="text-xs px-2 py-1 rounded-md border border-[#80609F]/30 bg-white/5 dark:bg-[#ffffff08] mr-1"
+            title="Prepend summarizer instruction before your text"
+          >
+            Summarize
+          </button>
+        )}
+
         <input
+          ref={promptRef}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           type="text"
