@@ -7,17 +7,17 @@ import toast from "react-hot-toast";
 import { assets } from "../assets/assets";
 
 /**
- * Message component — mobile-friendly speech with debug UI
+ * Message component — full, mobile-friendly speech with robust chunking and optional voice debug UI.
  */
 const Message = ({ message }) => {
   const [liked, setLiked] = useState(false);
   const [disliked, setDisliked] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  // speech
+  // speech state & voices
   const [speaking, setSpeaking] = useState(false);
   const [voices, setVoices] = useState([]);
-  const [selectedVoiceURI, setSelectedVoiceURI] = useState("auto"); // can be set by debug UI
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState("auto"); // "auto" or voiceURI/name via debug UI
   const utteranceRef = useRef(null);
   const initDoneRef = useRef(false);
 
@@ -31,7 +31,7 @@ const Message = ({ message }) => {
     } catch (e) {}
   }, [message.content]);
 
-  // --- voice loading & priming ---
+  // --- Load voices and prime speech on first gesture (mobile) ---
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
 
@@ -43,42 +43,44 @@ const Message = ({ message }) => {
             if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
             return (a.lang || "").localeCompare(b.lang || "");
           });
-          setVoices(sorted);
+          setVoices((prev) => {
+            if (!prev || prev.length !== sorted.length) return sorted;
+            return prev;
+          });
           return true;
         }
-      } catch (e) {
-        console.warn("loadVoices error", e);
+      } catch (err) {
+        console.warn("loadVoices error", err);
       }
       return false;
     };
 
-    // Try immediate, then voiceschanged, then polling: robust load
     loadVoices();
+
     const onVoicesChanged = () => {
       loadVoices();
       setLastVoiceListTime(Date.now());
     };
+
     try {
       window.speechSynthesis.addEventListener?.("voiceschanged", onVoicesChanged);
     } catch (e) {
       window.speechSynthesis.onvoiceschanged = onVoicesChanged;
     }
 
-    // Poll as fallback
+    // Poll fallback
     let attempts = 0;
     const poll = setInterval(() => {
       attempts += 1;
       if (loadVoices() || attempts >= 20) clearInterval(poll);
     }, 250);
 
-    // Prime on first gesture for mobile
+    // Prime engine on first gesture (important on many mobiles)
     const initSpeechOnGesture = () => {
       if (initDoneRef.current) return;
       initDoneRef.current = true;
-      // small test utterance to prime engine (silent if voice unavailable)
       try {
         const p = new SpeechSynthesisUtterance("hello");
-        // choose a safe minimal lang
         p.lang = navigator.language || "en-US";
         window.speechSynthesis.speak(p);
       } catch (e) {
@@ -108,10 +110,8 @@ const Message = ({ message }) => {
     };
   }, []);
 
-  // --- text cleaning ---
+  // ----------------- text cleaning helpers -----------------
   const removeEmojisAndControl = (str = "") => {
-    // remove surrogate pairs / emojis and control chars (keeps basic punctuation and letters)
-    // This is conservative: removes many uncommon symbols that might break TTS engines.
     return str
       .replace(/[\u{1F300}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, "")
       .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
@@ -131,12 +131,12 @@ const Message = ({ message }) => {
         .replace(/(\*|_){1,3}([^*_]+)\1{1,3}/g, "$2")
         .replace(/^\s*[-*+]\s+/gm, "")
         .replace(/^\s*\d+\.\s+/gm, "")
-        .replace(/&[#A-Za-z0-9]+;/g, " ") // remove HTML entities
+        .replace(/&[#A-Za-z0-9]+;/g, " ")
         .trim()
     );
   };
 
-  // --- language heuristics & voice selection ---
+  // ----------------- language detection & voice selection -----------------
   const detectLangCodeFromText = (text = "") => {
     if (!text) return navigator.language || "en-US";
     const trimmed = text.trim();
@@ -164,7 +164,7 @@ const Message = ({ message }) => {
       currentVoices = voices || [];
     }
 
-    // If debug UI forced a voice URI, use it
+    // If debug forced a voice, prefer it
     if (selectedVoiceURI && selectedVoiceURI !== "auto") {
       const forced = currentVoices.find((v) => v.voiceURI === selectedVoiceURI || v.name === selectedVoiceURI);
       if (forced) return forced;
@@ -186,31 +186,39 @@ const Message = ({ message }) => {
     return null;
   };
 
-  // --- chunk and speak safely ---
+  // ----------------- safe chunking (no lookbehind) -----------------
   const splitTextToChunks = (text, maxChunkLength = 180) => {
     if (!text) return [];
-    const sentences = text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
-    const chunks = [];
-    let current = "";
-    for (const s of sentences) {
-      if ((current + " " + s).trim().length <= maxChunkLength) {
-        current = (current + " " + s).trim();
-      } else {
-        if (current) chunks.push(current);
-        if (s.length <= maxChunkLength) current = s;
-        else {
-          for (let i = 0; i < s.length; i += maxChunkLength) chunks.push(s.slice(i, i + maxChunkLength));
-          current = "";
+    try {
+      const sentenceMatches = text.replace(/\n+/g, " ").match(/[^.!?]+[.!?]*\s*/g) || [];
+      const sentences = sentenceMatches.map((s) => s.trim()).filter(Boolean);
+      const chunks = [];
+      let current = "";
+      for (const s of sentences) {
+        if ((current + " " + s).trim().length <= maxChunkLength) {
+          current = (current + " " + s).trim();
+        } else {
+          if (current) chunks.push(current);
+          if (s.length <= maxChunkLength) current = s;
+          else {
+            for (let i = 0; i < s.length; i += maxChunkLength) chunks.push(s.slice(i, i + maxChunkLength));
+            current = "";
+          }
         }
       }
+      if (current) chunks.push(current);
+      if (chunks.length === 0 && text.length > 0) {
+        for (let i = 0; i < text.length; i += maxChunkLength) chunks.push(text.slice(i, i + maxChunkLength));
+      }
+      return chunks;
+    } catch (err) {
+      const out = [];
+      for (let i = 0; i < text.length; i += maxChunkLength) out.push(text.slice(i, i + maxChunkLength));
+      return out;
     }
-    if (current) chunks.push(current);
-    if (chunks.length === 0 && text.length > 0) {
-      for (let i = 0; i < text.length; i += maxChunkLength) chunks.push(text.slice(i, i + maxChunkLength));
-    }
-    return chunks;
   };
 
+  // ----------------- speaking functions -----------------
   const speakChunksSequentially = (text) => {
     const plain = stripMarkdown(text || "");
     if (!plain) {
@@ -253,18 +261,23 @@ const Message = ({ message }) => {
       } catch (e) {
         u.lang = detectLangCodeFromText(chunk) || navigator.language || "en-US";
       }
+
       u.rate = 0.95;
       u.pitch = 1;
       u.volume = 1;
+
       u.onstart = () => {
         utteranceRef.current = u;
         console.info("Speaking chunk:", chunk.slice(0, 80));
       };
+
       u.onend = () => setTimeout(() => speakNext(), 80);
+
       u.onerror = (err) => {
         console.error("Speech chunk error", err);
         setTimeout(() => speakNext(), 120);
       };
+
       try {
         window.speechSynthesis.speak(u);
       } catch (e) {
@@ -289,12 +302,10 @@ const Message = ({ message }) => {
       return;
     }
 
-    // small pre-speak test to ensure engine is healthy on some mobiles:
     try {
       window.speechSynthesis.cancel();
     } catch (e) {}
 
-    // If short, speak single utterance
     if (plain.length <= 200) {
       const chosenVoice = chooseVoiceSafely(plain);
       const u = new SpeechSynthesisUtterance(plain);
@@ -308,9 +319,11 @@ const Message = ({ message }) => {
       } catch (e) {
         u.lang = detectLangCodeFromText(plain) || navigator.language || "en-US";
       }
+
       u.rate = 0.95;
       u.pitch = 1;
       u.volume = 1;
+
       u.onstart = () => {
         setSpeaking(true);
         utteranceRef.current = u;
@@ -328,6 +341,7 @@ const Message = ({ message }) => {
         // fallback to chunked
         speakChunksSequentially(text);
       };
+
       try {
         window.speechSynthesis.speak(u);
       } catch (e) {
@@ -349,7 +363,7 @@ const Message = ({ message }) => {
     }
   };
 
-  // --- copy/share/download/like/dislike unchanged ---
+  // ----------------- copy/share/download/like/dislike -----------------
   const handleCopy = async () => {
     try {
       const textToCopy = message.isImage ? message.content : message.content;
@@ -360,15 +374,29 @@ const Message = ({ message }) => {
       toast.error("Failed to copy");
     }
   };
-  const handleLike = () => { setLiked(true); setDisliked(false); toast.success("Marked as helpful"); };
-  const handleDislike = () => { setDisliked(true); setLiked(false); toast("Thanks for your feedback!"); };
+
+  const handleLike = () => {
+    setLiked(true);
+    setDisliked(false);
+    toast.success("Marked as helpful");
+  };
+
+  const handleDislike = () => {
+    setDisliked(true);
+    setLiked(false);
+    toast("Thanks for your feedback!");
+  };
+
   const openWhatsAppShare = (text) => {
     const encoded = encodeURIComponent(text);
     const mobileUrl = `whatsapp://send?text=${encoded}`;
     const webUrl = `https://wa.me/?text=${encoded}`;
     const newWindow = window.open(mobileUrl, "_blank");
-    setTimeout(() => { if (!newWindow) window.open(webUrl, "_blank"); }, 300);
+    setTimeout(() => {
+      if (!newWindow) window.open(webUrl, "_blank");
+    }, 300);
   };
+
   const handleShareWhatsApp = () => {
     let textToShare = "";
     if (message.isImage) textToShare = `${message.content}\n\n(Shared via QuickGPT)`;
@@ -380,8 +408,12 @@ const Message = ({ message }) => {
     }
     openWhatsAppShare(textToShare);
   };
+
   const downloadImage = async () => {
-    if (!message.isImage || !message.content) { toast.error("No image to download"); return; }
+    if (!message.isImage || !message.content) {
+      toast.error("No image to download");
+      return;
+    }
     try {
       setDownloading(true);
       const res = await fetch(message.content, { mode: "cors" });
@@ -407,7 +439,7 @@ const Message = ({ message }) => {
     }
   };
 
-  // --- Voice Debug UI helpers ---
+  // ----------------- Voice Debug helpers & UI -----------------
   const listVoices = () => {
     try {
       const vs = (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices()) || voices || [];
@@ -428,7 +460,6 @@ const Message = ({ message }) => {
       toast.error("Selected voice not found");
       return;
     }
-    // Short test utterance
     try {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance("This is a voice test.");
@@ -444,12 +475,17 @@ const Message = ({ message }) => {
     }
   };
 
-  // ActionButtons
   const ActionButtons = () => (
     <div className="flex items-center gap-3 mt-2 text-xs text-purple-600 dark:text-purple-400 select-none">
       {!message.isImage && message.role === "assistant" && (
         <button
-          onClick={() => { if (speaking) stopSpeaking(); else speakText(stripMarkdown(message.content)); }}
+          onClick={() => {
+            if (speaking) stopSpeaking();
+            else {
+              const plain = stripMarkdown(message.content);
+              speakText(plain);
+            }
+          }}
           className="flex items-center gap-1 hover:text-purple-800"
           type="button"
           title={speaking ? "Stop speaking" : "Speak"}
@@ -515,14 +551,12 @@ const Message = ({ message }) => {
         </button>
       )}
 
-      {/* Debug toggle */}
       <button onClick={() => setDebugOpen((s) => !s)} className="ml-1 text-xs px-2 py-1 border rounded">
         {debugOpen ? "Hide Voice Debug" : "Voice Debug"}
       </button>
     </div>
   );
 
-  // --- Debug panel UI ---
   const VoiceDebugPanel = () => {
     const vs = (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices()) || voices || [];
     return (
@@ -544,7 +578,7 @@ const Message = ({ message }) => {
     );
   };
 
-  // --- Render ---
+  // ----------------- Render -----------------
   return (
     <div>
       {message.role === "user" ? (
