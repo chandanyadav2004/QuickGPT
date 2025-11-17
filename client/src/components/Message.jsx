@@ -7,7 +7,7 @@ import toast from "react-hot-toast";
 import { assets } from "../assets/assets";
 
 /**
- * Message component (updated mobile speech handling)
+ * Message component (with robust mobile-friendly speech)
  */
 const Message = ({ message }) => {
   const [liked, setLiked] = useState(false);
@@ -34,6 +34,27 @@ const Message = ({ message }) => {
       return;
     }
 
+    const tryLoadVoices = () => {
+      try {
+        const v = window.speechSynthesis.getVoices() || [];
+        if (v.length > 0) {
+          const sorted = v.slice().sort((a, b) => {
+            if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
+            return (a.lang || "").localeCompare(b.lang || "");
+          });
+          setVoices((prev) => {
+            if (!prev || prev.length !== sorted.length) return sorted;
+            return prev;
+          });
+          console.info(`[Speech] loaded ${v.length} voices`);
+          return true;
+        }
+      } catch (err) {
+        console.warn("tryLoadVoices error", err);
+      }
+      return false;
+    };
+
     const initSpeech = () => {
       if (initDoneRef.current) return;
       initDoneRef.current = true;
@@ -42,16 +63,14 @@ const Message = ({ message }) => {
       // Try immediate load
       tryLoadVoices();
 
-      // also try voiceschanged listener
+      // voiceschanged listener
       try {
         const onVoicesChanged = () => {
           tryLoadVoices();
         };
         window.speechSynthesis.addEventListener?.("voiceschanged", onVoicesChanged);
-        // keep a reference so we can remove the same listener on cleanup
         voicesPollRef.current = { onVoicesChanged };
       } catch (e) {
-        // older browsers fallback
         window.speechSynthesis.onvoiceschanged = tryLoadVoices;
       }
 
@@ -65,10 +84,8 @@ const Message = ({ message }) => {
       }, 250);
     };
 
-    const onFirstTouchOrClick = (ev) => {
-      // A user gesture — prime voices
+    const onFirstTouchOrClick = () => {
       initSpeech();
-      // remove listeners
       document.removeEventListener("touchstart", onFirstTouchOrClick, true);
       document.removeEventListener("click", onFirstTouchOrClick, true);
     };
@@ -76,7 +93,7 @@ const Message = ({ message }) => {
     document.addEventListener("touchstart", onFirstTouchOrClick, { passive: true, capture: true });
     document.addEventListener("click", onFirstTouchOrClick, { passive: true, capture: true });
 
-    // Also attempt immediate load for desktop (no gesture needed normally)
+    // Also attempt immediate load for desktop
     tryLoadVoices();
 
     return () => {
@@ -92,29 +109,6 @@ const Message = ({ message }) => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Robust load voices function (used by event listener + polling)
-  const tryLoadVoices = () => {
-    try {
-      const v = window.speechSynthesis.getVoices() || [];
-      if (v.length > 0) {
-        const sorted = v.slice().sort((a, b) => {
-          if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
-          return (a.lang || "").localeCompare(b.lang || "");
-        });
-        // update only if different length (avoid rerenders)
-        setVoices((prev) => {
-          if (!prev || prev.length !== sorted.length) return sorted;
-          return prev;
-        });
-        console.info(`[Speech] loaded ${v.length} voices`);
-        return true;
-      }
-    } catch (err) {
-      console.warn("tryLoadVoices error", err);
-    }
-    return false;
-  };
 
   // cleanup on unmount
   useEffect(() => {
@@ -139,7 +133,7 @@ const Message = ({ message }) => {
       .trim();
   };
 
-  // language heuristic & voice selection
+  // ---------- language heuristic & voice selection ----------
   const detectLangCodeFromText = (text = "") => {
     if (!text) return navigator.language || "en-US";
     const trimmed = text.trim();
@@ -169,7 +163,138 @@ const Message = ({ message }) => {
     return voices[0];
   };
 
-  // speak text
+  // ---------- Improved speech: chunking, safer voice selection ----------
+  // split text into chunks by sentences, maxChunkLength chars
+  const splitTextToChunks = (text, maxChunkLength = 180) => {
+    if (!text) return [];
+    const sentences = text
+      .replace(/\n+/g, " ")
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const chunks = [];
+    let current = "";
+    for (const s of sentences) {
+      if ((current + " " + s).trim().length <= maxChunkLength) {
+        current = (current + " " + s).trim();
+      } else {
+        if (current) chunks.push(current);
+        if (s.length <= maxChunkLength) {
+          current = s;
+        } else {
+          for (let i = 0; i < s.length; i += maxChunkLength) {
+            chunks.push(s.slice(i, i + maxChunkLength));
+          }
+          current = "";
+        }
+      }
+    }
+    if (current) chunks.push(current);
+    if (chunks.length === 0 && text.length > 0) {
+      for (let i = 0; i < text.length; i += maxChunkLength) {
+        chunks.push(text.slice(i, i + maxChunkLength));
+      }
+    }
+    return chunks;
+  };
+
+  const chooseVoiceSafely = (text) => {
+    let currentVoices = [];
+    try {
+      currentVoices = (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices()) || voices || [];
+    } catch (e) {
+      currentVoices = voices || [];
+    }
+
+    const targetLang = detectLangCodeFromText(text) || navigator.language || "en-US";
+
+    let chosen = currentVoices.find((v) => v.lang && v.lang.toLowerCase() === targetLang.toLowerCase());
+    if (chosen) return chosen;
+
+    const prefix = (targetLang || "").split("-")[0].toLowerCase();
+    chosen = currentVoices.find((v) => v.lang && (v.lang || "").split("-")[0].toLowerCase() === prefix);
+    if (chosen) return chosen;
+
+    chosen = currentVoices.find((v) => v.default) || currentVoices.find((v) => v.localService);
+    if (chosen) return chosen;
+
+    if (currentVoices.length > 0) return currentVoices[0];
+
+    return null;
+  };
+
+  const speakChunksSequentially = (text) => {
+    const plain = stripMarkdown(text || "");
+    const chunks = splitTextToChunks(plain, 200);
+    if (!chunks || chunks.length === 0) {
+      toast.error("Nothing to speak");
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel();
+    } catch (e) {}
+
+    const chosenVoice = chooseVoiceSafely(plain);
+    console.info("Available voices:", window.speechSynthesis.getVoices?.() || voices);
+    console.info("Chosen voice for speak:", chosenVoice ? `${chosenVoice.name} (${chosenVoice.lang})` : "none (fallback)");
+    toast.info(`Speaking with: ${chosenVoice?.name || (navigator.language || "default")}`);
+
+    let idx = 0;
+    setSpeaking(true);
+
+    const speakNext = () => {
+      if (idx >= chunks.length) {
+        setSpeaking(false);
+        utteranceRef.current = null;
+        return;
+      }
+
+      const chunk = chunks[idx++];
+      const u = new SpeechSynthesisUtterance(chunk);
+
+      try {
+        if (chosenVoice) {
+          u.voice = chosenVoice;
+          if (chosenVoice.lang) u.lang = chosenVoice.lang;
+        } else {
+          u.lang = detectLangCodeFromText(chunk) || navigator.language || "en-US";
+        }
+      } catch (e) {
+        console.warn("assign voice failed, using lang-only fallback", e);
+        u.lang = detectLangCodeFromText(chunk) || navigator.language || "en-US";
+      }
+
+      u.rate = 0.95;
+      u.pitch = 1;
+      u.volume = 1;
+
+      u.onstart = () => {
+        utteranceRef.current = u;
+        console.info("Speaking chunk:", chunk.slice(0, 80));
+      };
+
+      u.onend = () => {
+        setTimeout(() => speakNext(), 80);
+      };
+
+      u.onerror = (err) => {
+        console.error("Speech chunk error", err);
+        setTimeout(() => speakNext(), 120);
+      };
+
+      try {
+        window.speechSynthesis.speak(u);
+      } catch (e) {
+        console.error("speak() threw", e);
+        setTimeout(() => speakNext(), 120);
+      }
+    };
+
+    speakNext();
+  };
+
   const speakText = (text) => {
     if (!text) return;
     if (!("speechSynthesis" in window)) {
@@ -177,83 +302,55 @@ const Message = ({ message }) => {
       return;
     }
 
-    // Cancel any previous speech
-    try {
-      window.speechSynthesis.cancel();
-    } catch (e) {}
-
-    // Re-fetch voices just before speaking (helps with late arrival)
-    let currentVoices = [];
-    try {
-      currentVoices = window.speechSynthesis.getVoices() || [];
-      if (currentVoices.length > 0) {
-        const sorted = currentVoices.slice().sort((a, b) => {
-          if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
-          return (a.lang || "").localeCompare(b.lang || "");
-        });
-        setVoices((prev) => (prev.length === sorted.length ? prev : sorted));
-      }
-    } catch (e) {
-      console.warn("getVoices() before speak error", e);
-    }
-
-    // If voices still empty on mobile, warn user (but try speaking anyway)
-    if ((voices.length === 0 || currentVoices.length === 0) && !initDoneRef.current) {
-      // Not primed — show toast recommending a tap first (but we also attempt speak)
-      toast("Tap anywhere once and then try Speak again (mobile voice access).");
-      // still continue to attempt speak
-    }
-
-    const utterance = new SpeechSynthesisUtterance(text);
-
-    // pick voice
-    let chosenVoice = null;
-    if (selectedVoiceURI && selectedVoiceURI !== "auto") {
-      chosenVoice =
-        (currentVoices || voices || []).find((v) => v.voiceURI === selectedVoiceURI || v.name === selectedVoiceURI) ||
-        null;
-    } else {
-      const targetLang = detectLangCodeFromText(text);
-      chosenVoice = findBestVoiceForLang(targetLang);
-      if (!chosenVoice && currentVoices.length > 0) {
-        chosenVoice = currentVoices.find((v) => (v.lang || "").split("-")[0] === (targetLang || "").split("-")[0]) || currentVoices[0];
-      }
-    }
-
-    if (chosenVoice) {
+    const plain = stripMarkdown(text);
+    if (plain.length <= 200) {
       try {
-        utterance.voice = chosenVoice;
-        if (chosenVoice.lang) utterance.lang = chosenVoice.lang;
+        window.speechSynthesis.cancel();
+      } catch (e) {}
+
+      const chosenVoice = chooseVoiceSafely(plain);
+      const u = new SpeechSynthesisUtterance(plain);
+
+      try {
+        if (chosenVoice) {
+          u.voice = chosenVoice;
+          if (chosenVoice.lang) u.lang = chosenVoice.lang;
+        } else {
+          u.lang = detectLangCodeFromText(plain) || navigator.language || "en-US";
+        }
       } catch (e) {
-        console.warn("assign voice failed, fallback to lang only", e);
-        utterance.lang = navigator.language || "en-US";
+        u.lang = detectLangCodeFromText(plain) || navigator.language || "en-US";
+      }
+
+      u.rate = 0.95;
+      u.pitch = 1;
+      u.volume = 1;
+
+      u.onstart = () => {
+        setSpeaking(true);
+        utteranceRef.current = u;
+        console.info("Speaking (single):", plain.slice(0, 120));
+        toast.info(`Voice: ${u.voice?.name || u.lang}`);
+      };
+      u.onend = () => {
+        setSpeaking(false);
+        utteranceRef.current = null;
+      };
+      u.onerror = (err) => {
+        console.error("speech error (single)", err);
+        setSpeaking(false);
+        utteranceRef.current = null;
+        toast.error("Speech failed");
+      };
+
+      try {
+        window.speechSynthesis.speak(u);
+      } catch (e) {
+        console.error("speak single threw", e);
+        speakChunksSequentially(text);
       }
     } else {
-      utterance.lang = navigator.language || "en-US";
-    }
-
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-
-    utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => {
-      setSpeaking(false);
-      utteranceRef.current = null;
-    };
-    utterance.onerror = (err) => {
-      console.error("Speech error", err);
-      setSpeaking(false);
-      utteranceRef.current = null;
-      toast.error("Speech failed");
-    };
-
-    utteranceRef.current = utterance;
-    try {
-      window.speechSynthesis.speak(utterance);
-    } catch (e) {
-      console.error("speak exception", e);
-      toast.error("Could not start speech on this device/browser.");
+      speakChunksSequentially(text);
     }
   };
 
@@ -279,7 +376,7 @@ const Message = ({ message }) => {
     }
   };
 
-  // likes/dislikes, share, download are unchanged (kept minimal here)
+  // likes/dislikes, share, download
   const handleLike = () => {
     setLiked(true);
     setDisliked(false);
@@ -349,7 +446,7 @@ const Message = ({ message }) => {
     }
   };
 
-  // ActionButtons (unchanged visually, uses speakText/stopSpeaking)
+  // ActionButtons (uses speakText/stopSpeaking)
   const ActionButtons = () => {
     return (
       <div className="flex items-center gap-3 mt-2 text-xs text-purple-600 dark:text-purple-400 select-none">
