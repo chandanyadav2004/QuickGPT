@@ -7,15 +7,7 @@ import toast from "react-hot-toast";
 import { assets } from "../assets/assets";
 
 /**
- * Message component
- * Props:
- *  - message: {
- *      role: 'user'|'assistant',
- *      content: string,   // text or image URL
- *      isImage?: boolean,
- *      timestamp: number,
- *      isPublished?: boolean
- *    }
+ * Message component (updated mobile speech handling)
  */
 const Message = ({ message }) => {
   const [liked, setLiked] = useState(false);
@@ -25,45 +17,106 @@ const Message = ({ message }) => {
   // speech state & voices
   const [speaking, setSpeaking] = useState(false);
   const [voices, setVoices] = useState([]);
-  // keep selectedVoiceURI = "auto" internally (no dropdown UI)
   const [selectedVoiceURI] = useState("auto");
   const utteranceRef = useRef(null);
+  const voicesPollRef = useRef(null);
+  const initDoneRef = useRef(false);
 
   useEffect(() => {
     try {
       Prism.highlightAll();
-    } catch (e) {
-      // ignore if prism not applicable
-    }
+    } catch (e) {}
   }, [message.content]);
 
-  // Load voices (may be async)
+  // ---- Init speech on first user gesture (important for mobile) ----
   useEffect(() => {
     if (!("speechSynthesis" in window)) {
-      setVoices([]);
       return;
     }
 
-    const loadVoices = () => {
-      const v = window.speechSynthesis.getVoices();
-      const sorted = v.slice().sort((a, b) => {
-        if (a.lang === b.lang) return a.name.localeCompare(b.name);
-        return a.lang.localeCompare(b.lang);
-      });
-      setVoices(sorted);
+    const initSpeech = () => {
+      if (initDoneRef.current) return;
+      initDoneRef.current = true;
+      console.info("[Speech] initSpeech triggered by user gesture");
+
+      // Try immediate load
+      tryLoadVoices();
+
+      // also try voiceschanged listener
+      try {
+        const onVoicesChanged = () => {
+          tryLoadVoices();
+        };
+        window.speechSynthesis.addEventListener?.("voiceschanged", onVoicesChanged);
+        // keep a reference so we can remove the same listener on cleanup
+        voicesPollRef.current = { onVoicesChanged };
+      } catch (e) {
+        // older browsers fallback
+        window.speechSynthesis.onvoiceschanged = tryLoadVoices;
+      }
+
+      // Poll for voices a bit longer (helpful on iOS)
+      let attempts = 0;
+      const poll = setInterval(() => {
+        attempts += 1;
+        if (tryLoadVoices() || attempts >= 20) {
+          clearInterval(poll);
+        }
+      }, 250);
     };
 
-    loadVoices();
-    window.speechSynthesis.onvoiceschanged = loadVoices;
+    const onFirstTouchOrClick = (ev) => {
+      // A user gesture — prime voices
+      initSpeech();
+      // remove listeners
+      document.removeEventListener("touchstart", onFirstTouchOrClick, true);
+      document.removeEventListener("click", onFirstTouchOrClick, true);
+    };
+
+    document.addEventListener("touchstart", onFirstTouchOrClick, { passive: true, capture: true });
+    document.addEventListener("click", onFirstTouchOrClick, { passive: true, capture: true });
+
+    // Also attempt immediate load for desktop (no gesture needed normally)
+    tryLoadVoices();
 
     return () => {
       try {
-        window.speechSynthesis.onvoiceschanged = null;
+        document.removeEventListener("touchstart", onFirstTouchOrClick, true);
+        document.removeEventListener("click", onFirstTouchOrClick, true);
+        if (voicesPollRef.current?.onVoicesChanged) {
+          window.speechSynthesis.removeEventListener?.("voiceschanged", voicesPollRef.current.onVoicesChanged);
+        } else {
+          window.speechSynthesis.onvoiceschanged = null;
+        }
       } catch (e) {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // cleanup on unmount: stop any speech
+  // Robust load voices function (used by event listener + polling)
+  const tryLoadVoices = () => {
+    try {
+      const v = window.speechSynthesis.getVoices() || [];
+      if (v.length > 0) {
+        const sorted = v.slice().sort((a, b) => {
+          if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
+          return (a.lang || "").localeCompare(b.lang || "");
+        });
+        // update only if different length (avoid rerenders)
+        setVoices((prev) => {
+          if (!prev || prev.length !== sorted.length) return sorted;
+          return prev;
+        });
+        console.info(`[Speech] loaded ${v.length} voices`);
+        return true;
+      }
+    } catch (err) {
+      console.warn("tryLoadVoices error", err);
+    }
+    return false;
+  };
+
+  // cleanup on unmount
   useEffect(() => {
     return () => {
       try {
@@ -72,7 +125,7 @@ const Message = ({ message }) => {
     };
   }, []);
 
-  // Simple markdown stripper for sharing text and for speech
+  // utility: strip markdown for speak and share
   const stripMarkdown = (md = "") => {
     return md
       .replace(/```[\s\S]*?```/g, "")
@@ -86,7 +139,7 @@ const Message = ({ message }) => {
       .trim();
   };
 
-  // ---------- language heuristic ----------
+  // language heuristic & voice selection
   const detectLangCodeFromText = (text = "") => {
     if (!text) return navigator.language || "en-US";
     const trimmed = text.trim();
@@ -100,7 +153,6 @@ const Message = ({ message }) => {
       if (/\p{Script=Cyrillic}/u.test(trimmed)) return "ru-RU";
       if (/[가-힣]/.test(trimmed)) return "ko-KR";
     } catch (e) {
-      // fallback if Unicode property escapes not supported
       if (/[一-龯]/.test(trimmed)) return "zh-CN";
       if (/[ㄱ-ㅎㅏ-ㅣ가-힣]/.test(trimmed)) return "ko-KR";
     }
@@ -111,13 +163,13 @@ const Message = ({ message }) => {
     if (!voices || voices.length === 0) return null;
     const exact = voices.find((v) => v.lang && v.lang.toLowerCase() === targetLang.toLowerCase());
     if (exact) return exact;
-    const prefix = targetLang.split("-")[0].toLowerCase();
-    const prefixMatch = voices.find((v) => v.lang && v.lang.split("-")[0].toLowerCase() === prefix);
+    const prefix = (targetLang || "").split("-")[0].toLowerCase();
+    const prefixMatch = voices.find((v) => v.lang && (v.lang || "").split("-")[0].toLowerCase() === prefix);
     if (prefixMatch) return prefixMatch;
     return voices[0];
   };
 
-  // ---------- Text-to-Speech functions (manual toggle, multi-language) ----------
+  // speak text
   const speakText = (text) => {
     if (!text) return;
     if (!("speechSynthesis" in window)) {
@@ -125,23 +177,57 @@ const Message = ({ message }) => {
       return;
     }
 
+    // Cancel any previous speech
     try {
       window.speechSynthesis.cancel();
     } catch (e) {}
 
+    // Re-fetch voices just before speaking (helps with late arrival)
+    let currentVoices = [];
+    try {
+      currentVoices = window.speechSynthesis.getVoices() || [];
+      if (currentVoices.length > 0) {
+        const sorted = currentVoices.slice().sort((a, b) => {
+          if (a.lang === b.lang) return (a.name || "").localeCompare(b.name || "");
+          return (a.lang || "").localeCompare(b.lang || "");
+        });
+        setVoices((prev) => (prev.length === sorted.length ? prev : sorted));
+      }
+    } catch (e) {
+      console.warn("getVoices() before speak error", e);
+    }
+
+    // If voices still empty on mobile, warn user (but try speaking anyway)
+    if ((voices.length === 0 || currentVoices.length === 0) && !initDoneRef.current) {
+      // Not primed — show toast recommending a tap first (but we also attempt speak)
+      toast("Tap anywhere once and then try Speak again (mobile voice access).");
+      // still continue to attempt speak
+    }
+
     const utterance = new SpeechSynthesisUtterance(text);
 
+    // pick voice
     let chosenVoice = null;
     if (selectedVoiceURI && selectedVoiceURI !== "auto") {
-      chosenVoice = voices.find((v) => v.voiceURI === selectedVoiceURI || v.name === selectedVoiceURI);
+      chosenVoice =
+        (currentVoices || voices || []).find((v) => v.voiceURI === selectedVoiceURI || v.name === selectedVoiceURI) ||
+        null;
     } else {
       const targetLang = detectLangCodeFromText(text);
       chosenVoice = findBestVoiceForLang(targetLang);
+      if (!chosenVoice && currentVoices.length > 0) {
+        chosenVoice = currentVoices.find((v) => (v.lang || "").split("-")[0] === (targetLang || "").split("-")[0]) || currentVoices[0];
+      }
     }
 
     if (chosenVoice) {
-      utterance.voice = chosenVoice;
-      if (chosenVoice.lang) utterance.lang = chosenVoice.lang;
+      try {
+        utterance.voice = chosenVoice;
+        if (chosenVoice.lang) utterance.lang = chosenVoice.lang;
+      } catch (e) {
+        console.warn("assign voice failed, fallback to lang only", e);
+        utterance.lang = navigator.language || "en-US";
+      }
     } else {
       utterance.lang = navigator.language || "en-US";
     }
@@ -150,15 +236,13 @@ const Message = ({ message }) => {
     utterance.pitch = 1;
     utterance.volume = 1;
 
-    utterance.onstart = () => {
-      setSpeaking(true);
-    };
+    utterance.onstart = () => setSpeaking(true);
     utterance.onend = () => {
       setSpeaking(false);
       utteranceRef.current = null;
     };
     utterance.onerror = (err) => {
-      console.error("speech error", err);
+      console.error("Speech error", err);
       setSpeaking(false);
       utteranceRef.current = null;
       toast.error("Speech failed");
@@ -168,8 +252,8 @@ const Message = ({ message }) => {
     try {
       window.speechSynthesis.speak(utterance);
     } catch (e) {
-      console.error("speak error", e);
-      toast.error("Could not start speech");
+      console.error("speak exception", e);
+      toast.error("Could not start speech on this device/browser.");
     }
   };
 
@@ -195,20 +279,18 @@ const Message = ({ message }) => {
     }
   };
 
-  // ---------- LIKE / DISLIKE ----------
+  // likes/dislikes, share, download are unchanged (kept minimal here)
   const handleLike = () => {
     setLiked(true);
     setDisliked(false);
     toast.success("Marked as helpful");
   };
-
   const handleDislike = () => {
     setDisliked(true);
     setLiked(false);
     toast("Thanks for your feedback!");
   };
 
-  // ---------- WHATSAPP SHARE ----------
   const openWhatsAppShare = (text) => {
     const encoded = encodeURIComponent(text);
     const mobileUrl = `whatsapp://send?text=${encoded}`;
@@ -224,7 +306,6 @@ const Message = ({ message }) => {
 
   const handleShareWhatsApp = () => {
     let textToShare = "";
-
     if (message.isImage) {
       textToShare = `${message.content}\n\n(Shared via QuickGPT)`;
     } else {
@@ -233,17 +314,14 @@ const Message = ({ message }) => {
       const truncated = plain.length > maxLen ? plain.slice(0, maxLen) + "…" : plain;
       textToShare = `${truncated}\n\n(Shared via QuickGPT)`;
     }
-
     openWhatsAppShare(textToShare);
   };
 
-  // ---------- DOWNLOAD IMAGE ----------
   const downloadImage = async () => {
     if (!message.isImage || !message.content) {
       toast.error("No image to download");
       return;
     }
-
     try {
       setDownloading(true);
       const res = await fetch(message.content, { mode: "cors" });
@@ -271,11 +349,10 @@ const Message = ({ message }) => {
     }
   };
 
-  // ---------- Small ActionButtons component ----------
+  // ActionButtons (unchanged visually, uses speakText/stopSpeaking)
   const ActionButtons = () => {
     return (
       <div className="flex items-center gap-3 mt-2 text-xs text-purple-600 dark:text-purple-400 select-none">
-        {/* Speaker controls: visible for assistant text messages (no dropdown) */}
         {!message.isImage && message.role === "assistant" && (
           <button
             onClick={() => {
@@ -305,7 +382,6 @@ const Message = ({ message }) => {
           </button>
         )}
 
-        {/* Copy */}
         <button onClick={handleCopy} className="flex items-center gap-1 hover:text-purple-800" type="button" title="Copy">
           <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
@@ -314,7 +390,6 @@ const Message = ({ message }) => {
           <span className="text-purple-600">Copy</span>
         </button>
 
-        {/* Like */}
         <button onClick={handleLike} className={`flex items-center gap-1 transition hover:text-purple-800`} type="button" title="Like" aria-pressed={liked}>
           <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 opacity-80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -323,7 +398,6 @@ const Message = ({ message }) => {
           <span className={`text-purple-600 ${liked ? "text-purple-800" : ""}`}>Like</span>
         </button>
 
-        {/* Dislike */}
         <button onClick={handleDislike} className={`flex items-center gap-1 transition hover:text-purple-800`} type="button" title="Dislike" aria-pressed={disliked}>
           <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 opacity-80" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -332,7 +406,6 @@ const Message = ({ message }) => {
           <span className={`text-purple-600 ${disliked ? "text-red-500" : ""}`}>Dislike</span>
         </button>
 
-        {/* WhatsApp Share */}
         <button onClick={handleShareWhatsApp} className="flex items-center gap-1 hover:text-purple-800 transition" type="button" title="Share to WhatsApp">
           <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 opacity-90" viewBox="0 0 24 24" fill="currentColor">
             <path d="M12.04 2C6.48 2 2 6.48 2 12.04c0 1.99.52 3.84 1.49 5.48L2 22l4.72-1.22A9.93 9.93 0 0012.04 22C17.6 22 22 17.52 22 11.96 22 6.4 17.6 2 12.04 2zm0 17.4c-1.78 0-3.47-.48-4.95-1.36l-.35-.21-2.8.72.75-2.73-.22-.36A7.1 7.1 0 014.94 12c0-3.33 2.7-6.03 6.05-6.03 3.34 0 6.04 2.7 6.04 6.03 0 3.34-2.7 6.04-6.04 6.04z"/>
@@ -341,7 +414,6 @@ const Message = ({ message }) => {
           <span className="text-purple-600">Share</span>
         </button>
 
-        {/* Download (only for images) */}
         {message.isImage && (
           <button onClick={downloadImage} className="flex items-center gap-1 hover:text-purple-800 transition" type="button" title="Download image" disabled={downloading}>
             {downloading ? (
@@ -358,7 +430,7 @@ const Message = ({ message }) => {
     );
   };
 
-  // ---------- Render ----------
+  // Render
   return (
     <div>
       {message.role === "user" ? (
@@ -381,7 +453,6 @@ const Message = ({ message }) => {
 
           <span className="text-xs text-gray-400 dark:text-[#B1A6C0]">{moment(message.timestamp).fromNow()}</span>
 
-          {/* show actions for both text and images (download appears only for images) */}
           <ActionButtons />
         </div>
       )}
