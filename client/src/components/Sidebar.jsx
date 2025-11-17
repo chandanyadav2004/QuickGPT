@@ -24,6 +24,125 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
   const searchRef = useRef(null);
   const [autoCreated, setAutoCreated] = useState(false);
 
+  // Auto-delete timeout in minutes (change as needed)
+  const AUTO_DELETE_MINUTES = 15;
+  // internal map of timers for scheduled deletions: { [chatId]: timeoutId }
+  const deletionTimersRef = useRef({});
+
+  // Helper: schedule deletion for an empty chat after ms milliseconds
+  const scheduleDeletionForEmptyChat = (chatId, ms = AUTO_DELETE_MINUTES * 60 * 1000) => {
+    // if already scheduled, do nothing
+    if (deletionTimersRef.current[chatId]) return;
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        // Re-check latest chats state to ensure chat still exists and is empty
+        const currentChat = (chats || []).find((c) => c._id === chatId);
+        if (!currentChat) {
+          cleanupTimer(chatId);
+          return;
+        }
+
+        const hasMessages = Array.isArray(currentChat.messages) && currentChat.messages.length > 0;
+        const firstMessageContentEmpty = hasMessages
+          ? !(currentChat.messages[0]?.content?.trim?.()) // if first message exists but empty string trimmed
+          : true;
+
+        // If the chat is still empty (no messages or first message empty), delete it
+        if (!hasMessages || firstMessageContentEmpty) {
+          // call delete API (silent)
+          try {
+            const { data } = await axios.post(
+              "/api/chat/delete",
+              { chatId },
+              { headers: { Authorization: token } }
+            );
+            if (data?.success) {
+              setChats((prev) => (prev ? prev.filter((c) => c._id !== chatId) : []));
+              // optionally refresh server chats
+              if (typeof fetchUserChats === "function") {
+                await fetchUserChats();
+              }
+            } else {
+              // if backend returned failure, don't spam user; just clean timer
+              console.warn("Auto-delete failed:", data?.message);
+            }
+          } catch (err) {
+            console.warn("Auto-delete request failed:", err);
+          }
+        }
+      } finally {
+        cleanupTimer(chatId);
+      }
+    }, ms);
+
+    deletionTimersRef.current[chatId] = timeoutId;
+  };
+
+  const cleanupTimer = (chatId) => {
+    const t = deletionTimersRef.current[chatId];
+    if (t) {
+      clearTimeout(t);
+      delete deletionTimersRef.current[chatId];
+    }
+  };
+
+  // If chats change (e.g. a chat received a new message), clear timers for chats that are no longer empty
+  useEffect(() => {
+    if (!chats || chats.length === 0) return;
+
+    for (const chat of chats) {
+      const hasMessages = Array.isArray(chat.messages) && chat.messages.length > 0;
+      if (hasMessages && deletionTimersRef.current[chat._id]) {
+        // chat is no longer empty -> cancel scheduled deletion
+        cleanupTimer(chat._id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chats]);
+
+  // Wrap createNewChat so we can schedule deletion for the created chat
+  const handleCreateNewChat = async (timeoutMinutes = AUTO_DELETE_MINUTES) => {
+    try {
+      // createNewChat is a function from context -- may return created chat or update server-side only.
+      const created = await createNewChat();
+
+      // If createNewChat returns a chat object, use it; else fetch latest chats
+      let createdChat = created;
+      if (!createdChat || !createdChat._id) {
+        if (typeof fetchUserChats === "function") {
+          const latest = await fetchUserChats();
+          const latestChats = Array.isArray(latest) ? latest : chats || [];
+          if (latestChats.length > 0) {
+            createdChat = latestChats
+              .slice()
+              .sort(
+                (a, b) =>
+                  new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)
+              )[0];
+          }
+        }
+      }
+
+      if (createdChat && createdChat._id) {
+        setChats((prev) => {
+          const filtered = prev ? prev.filter((c) => c._id !== createdChat._id) : [];
+          return [createdChat, ...filtered];
+        });
+        setSelectedChat(createdChat);
+        navigate("/");
+        // schedule deletion if chat remains empty
+        scheduleDeletionForEmptyChat(createdChat._id, timeoutMinutes * 60 * 1000);
+      } else {
+        // if no created chat object, just show a toast and let other flows handle it
+        console.warn("createNewChat did not return a chat object.");
+      }
+    } catch (err) {
+      console.error("Error creating new chat:", err);
+      toast.error("Failed to create chat");
+    }
+  };
+
   // -------------------------------
   // Auto-create a new chat on app load (keep previous chats)
   // -------------------------------
@@ -35,24 +154,25 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
 
     (async () => {
       try {
-        // try to create a new chat; many implementations return the created chat object
         const created = await createNewChat();
 
+        // If returned created object -> use our handler behavior
         if (!cancelled && created && created._id) {
-          // prepend new chat but avoid duplicates
           setChats((prev) => {
             const filtered = prev ? prev.filter((c) => c._id !== created._id) : [];
             return [created, ...filtered];
           });
           setSelectedChat(created);
           navigate("/");
+          // schedule deletion for the auto-created chat
+          scheduleDeletionForEmptyChat(created._id);
           setAutoCreated(true);
           return;
         }
 
-        // fallback: if createNewChat didn't return created object, fetch latest chats
+        // fallback: fetch latest chats and pick the newest
         if (!cancelled && typeof fetchUserChats === "function") {
-          const latest = await fetchUserChats(); // may set chats internally or return array
+          const latest = await fetchUserChats();
           const latestChats = Array.isArray(latest) ? latest : (chats || []);
           if (latestChats.length > 0) {
             const newest = latestChats
@@ -68,13 +188,14 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
               });
               setSelectedChat(newest);
               navigate("/");
+              // schedule deletion in case that newest is a truly-empty chat
+              scheduleDeletionForEmptyChat(newest._id);
               setAutoCreated(true);
               return;
             }
           }
         }
 
-        // mark done to avoid retry loops
         setAutoCreated(true);
       } catch (err) {
         console.error("Auto-create chat failed:", err);
@@ -97,10 +218,8 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
   const deleteChat = async (e, chatId) => {
     try {
       e.stopPropagation();
-      const confirm = window.confirm(
-        "Are you sure you want to delete this chat?"
-      );
-      if (!confirm) return;
+      const confirmDelete = window.confirm("Are you sure you want to delete this chat?");
+      if (!confirmDelete) return;
 
       const { data } = await axios.post(
         "/api/chat/delete",
@@ -109,6 +228,8 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
       );
 
       if (data.success) {
+        // clear any scheduled deletion for that chat
+        cleanupTimer(chatId);
         setChats((prev) => prev.filter((chat) => chat._id !== chatId));
         await fetchUserChats();
         toast.success(data.message);
@@ -136,7 +257,7 @@ const Sidebar = ({ isMenuOpen, setIsMenuOpen }) => {
 
       {/* New Chat Button */}
       <button
-        onClick={createNewChat}
+        onClick={() => handleCreateNewChat()} // use wrapper so we can schedule deletion
         className="flex justify-center items-center w-full py-2 mt-10 
         text-white bg-gradient-to-r from-[#A456F7] to-[#3081F6] 
         text-sm rounded-md cursor-pointer"
